@@ -80,22 +80,42 @@ object Executor {
                     visitedFragmentNames: Map[String, Boolean] = Map.empty): Map[String, List[SelectionContext]] = {
 
 
-    selectionSet.selection() flatMap { selection =>
-      selection.getRuleIndex match {
-        case GraphQlParser.RULE_field =>
-          val field = selection.field()
+    selectionSet.selection().foldLeft(fields)((result, selection) =>
 
-          shouldIncludeNode(exeContext, field.directives().directive().toList) match {
-            case false => None
-            case _ => None
+      // Check for field
+      selection.field() match {
+        case value: FieldContext =>
+          shouldIncludeNode(exeContext, value.directives()) match {
+            case false => fields
+            case _ =>
+              val name = getFieldEntryKey(value)
+              val merged = List(selection) ++ fields.getOrElse(name, List.empty)
+
+              // The second key in the map will override the first one when merging
+              fields ++ Map(name -> merged)
           }
 
-        case GraphQlParser.RULE_inlineFragment => None
-        case GraphQlParser.RULE_fragmentSpread => None
-      }
-    }
+        case _ =>
 
-    Map.empty
+          // Check for fragment spread
+          selection.fragmentSpread() match {
+            case value: FragmentSpreadContext =>
+              // FIXME: Implement
+              fields
+            case _ =>
+
+              // Check for inline fragment
+              selection.inlineFragment() match {
+                case value: InlineFragmentContext =>
+                  // FIXME: Implement
+                  fields
+                case _ =>
+                  // Is this possible?
+                  throw new GraphQLError("Tried to run collectFields on unknown selection", List(selection))
+              }
+          }
+      }
+    )
   }
 
   /**
@@ -111,8 +131,13 @@ object Executor {
    */
   // FIXME: Implement properly
   def shouldIncludeNode(exeContext: ExecutionContext,
-                        directives: List[DirectiveContext]): Boolean = {
-    true
+                        directives: DirectivesContext): Boolean = {
+
+    // directives can produce null pointer
+    directives match {
+      case entry: DirectivesContext => true //entry.directive() map
+      case _ => true
+    }
   }
 
   def getOperationRootType(schema: GraphQLSchema,
@@ -140,25 +165,21 @@ object Executor {
 
     // FIXME: Might be improved...
     val fragments: Map[String, FragmentDefinitionContext] = definitionSet flatMap { entry =>
-      entry.getRuleIndex match {
-        case GraphQlParser.RULE_fragmentDefinition =>
-          val fragment = entry.asInstanceOf[FragmentDefinitionContext]
-          Some(fragment.fragmentName().NAME().getText -> fragment)
+      entry.fragmentDefinition() match {
+        case value: FragmentDefinitionContext => Some(value.getText -> value)
         case _ => None
       }
     } toMap
 
     // FIXME: Might be improved...
     val operations: Map[String, OperationDefinitionContext] = definitionSet flatMap { entry =>
-      entry.getRuleIndex match {
-        case GraphQlParser.RULE_operationDefinition =>
-          val operation = entry.asInstanceOf[OperationDefinitionContext]
-          Some(operation.NAME().getText -> operation)
+      entry.operationDefinition() match {
+        case value: OperationDefinitionContext => Some(value.NAME().getText -> value)
         case _ => None
       }
     } toMap
 
-    if (operationName.length > 0 && operations.size != 1) {
+    if (operationName.length == 0 && operations.size != 1) {
       throw new GraphQLError("Must provide operation name if query contains multiple operations")
     }
 
